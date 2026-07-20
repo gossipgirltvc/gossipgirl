@@ -1,0 +1,127 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Gossip Girl — Public Posts</title>
+  <style>
+    :root{
+      --ink:#111;
+      --panel:rgba(20,14,22,0.72);
+      --magenta:#e21f6b;
+      --gold:#e8cd6d;
+      --bg:#f8f7f5;
+    }
+    *{box-sizing:border-box}
+    body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial; margin:0;background:var(--bg);color:var(--ink);}
+    header{background:var(--panel);color:#fff;padding:24px 16px}
+    .wrap{max-width:900px;margin:24px auto;padding:0 16px}
+    h1{margin:0;font-family:serif}
+    #posts{margin-top:18px;display:flex;flex-direction:column;gap:12px}
+    .post{background:#fff;border-radius:8px;padding:14px;box-shadow:0 1px 4px rgba(0,0,0,0.06)}
+    .post h3{margin:0 0 8px 0}
+    .meta{font-size:12px;color:#666;margin-bottom:8px}
+    .controls{display:flex;gap:8px;align-items:center}
+    .btn{background:var(--magenta);color:#fff;padding:8px 12px;border-radius:6px;text-decoration:none}
+    .note{font-size:13px;color:#444;margin-top:12px}
+    textarea{width:100%;min-height:120px}
+  </style>
+</head>
+<body>
+  <header>
+    <div class="wrap">
+      <h1>Gossip Girl — Public posts</h1>
+      <div class="note">Posts are stored in GitHub Issues for persistence. Posting requires a GitHub login — only the person with the account/password can create posts. The site no longer contains any passwords.</div>
+    </div>
+  </header>
+
+  <main class="wrap">
+    <div class="controls">
+      <a id="newPost" class="btn" target="_blank" rel="noopener">Create a new post</a>
+      <div class="note">(Clicking "Create a new post" opens GitHub's New Issue page for this repository. Sign in with your GitHub account to post.)</div>
+    </div>
+
+    <section id="posts" aria-live="polite">
+      <p>Loading posts…</p>
+    </section>
+  </main>
+
+  <script>
+    // Repository owner/repo
+    const OWNER = 'gossipgirltvc';
+    const REPO = 'gossipgirl';
+
+    // Build URL to open a pre-filled new-issue page (label=post helps keep posts separate)
+    const newIssueBase = `https://github.com/${OWNER}/${REPO}/issues/new?labels=post&title=`;
+    document.getElementById('newPost').href = newIssueBase + encodeURIComponent('Post title here') + '&body=' + encodeURIComponent('Write your post here...');
+
+    // Fetch open issues labeled "post" and render them as posts
+    async function loadPosts(){
+      const url = `https://api.github.com/repos/${OWNER}/${REPO}/issues?state=open&labels=post&per_page=100`;
+      try{
+        const res = await fetch(url, { headers: { 'Accept': 'application/vnd.github.v3+json' } });
+        if(!res.ok) throw new Error('Failed to fetch posts: ' + res.status);
+        const issues = await res.json();
+        renderPosts(issues);
+      }catch(err){
+        console.error(err);
+        document.getElementById('posts').innerHTML = '<p style="color:#900">Could not load posts. The repository might be empty or the GitHub API rate limit was reached.</p>';
+      }
+    }
+
+    // Very small helper to escape HTML then convert newlines to <br>
+    function escapeHtml(s){
+      return s
+        .replace(/&/g,'&amp;')
+        .replace(/</g,'&lt;')
+        .replace(/>/g,'&gt;')
+        .replace(/"/g,'&quot;')
+        .replace(/'/g,'&#039;');
+    }
+
+    function renderPosts(issues){
+      const container = document.getElementById('posts');
+      container.innerHTML = '';
+      if(!issues || issues.length === 0){
+        container.innerHTML = '<p>No posts yet. Click "Create a new post" to add the first post (requires GitHub login).</p>';
+        return;
+      }
+      // Sort by created_at ascending
+      issues.sort((a,b)=> new Date(b.created_at) - new Date(a.created_at));
+      for(const issue of issues){
+        // Only show regular issues (not PRs)
+        if(issue.pull_request) continue;
+        const div = document.createElement('article');
+        div.className = 'post';
+        const title = document.createElement('h3');
+        title.textContent = issue.title || 'Untitled';
+        const meta = document.createElement('div');
+        meta.className = 'meta';
+        const date = new Date(issue.created_at).toLocaleString();
+        meta.textContent = `Posted by ${issue.user.login} on ${date}`;
+        const body = document.createElement('div');
+        body.className = 'body';
+        const safe = escapeHtml(issue.body || '');
+        body.innerHTML = safe.replace(/\n/g,'<br>');
+
+        // link to the original issue for comments
+        const link = document.createElement('a');
+        link.href = issue.html_url;
+        link.target = '_blank';
+        link.rel = 'noopener';
+        link.textContent = 'View on GitHub';
+        link.style.display = 'inline-block';
+        link.style.marginTop = '8px';
+
+        div.appendChild(title);
+        div.appendChild(meta);
+        div.appendChild(body);
+        div.appendChild(link);
+        container.appendChild(div);
+      }
+    }
+
+    loadPosts();
+  </script>
+</body>
+</html>
