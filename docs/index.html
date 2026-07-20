@@ -1,0 +1,212 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Gossip Girl (Secure)</title>
+  <style>
+    :root{--bg:#0b0710;--panel:#121018;--accent:#e21f6b;--muted:#bbb;}
+    body{font-family:system-ui,Segoe UI,Roboto,Helvetica,Arial;min-height:100vh;margin:0;background:linear-gradient(180deg,#050308 0%,#0b0710 100%);color:#fff}
+    .wrap{max-width:820px;margin:32px auto;padding:20px;background:rgba(255,255,255,0.03);border-radius:12px}
+    h1{margin:0 0 12px;font-size:26px}
+    .muted{color:var(--muted);font-size:13px}
+    #login{display:flex;gap:8px;align-items:center}
+    input[type=password]{padding:8px;border-radius:6px;border:1px solid rgba(255,255,255,0.08);background:transparent;color:#fff}
+    button{background:var(--accent);color:#111;border:none;padding:8px 12px;border-radius:6px;cursor:pointer}
+    #posts{margin-top:18px}
+    .post{background:rgba(255,255,255,0.03);padding:12px;border-radius:8px;margin-bottom:10px}
+    textarea{width:100%;min-height:90px;padding:8px;border-radius:6px;border:1px solid rgba(255,255,255,0.06);background:transparent;color:#fff}
+    .controls{display:flex;gap:8px;margin-top:8px}
+    .small{font-size:13px;color:var(--muted)}
+    .hint{font-size:12px;color:#f4f4f4;background:rgba(255,255,255,0.02);padding:8px;border-radius:6px;margin-top:12px}
+    footer{margin-top:18px;color:var(--muted);font-size:13px}
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <h1>Gossip Girl — Secure Client</h1>
+    <p class="muted">This site stores posts encrypted in your browser (localStorage). Only someone who knows the password can decrypt and read posts. No passwords are stored in the page source.</p>
+
+    <div id="auth">
+      <div id="login">
+        <input id="password" type="password" placeholder="Enter password" aria-label="password">
+        <button id="unlock">Unlock</button>
+        <button id="logout" style="display:none">Lock</button>
+      </div>
+      <div id="loginMsg" class="small"></div>
+    </div>
+
+    <div id="app" style="display:none">
+      <div>
+        <label for="newpost" class="small">New post (visible to anyone who can decrypt):</label>
+        <textarea id="newpost" placeholder="Write something..."></textarea>
+        <div class="controls">
+          <button id="post">Post</button>
+          <button id="export">Export encrypted data</button>
+          <button id="import">Import encrypted data</button>
+          <input id="importFile" type="file" accept="application/json" style="display:none">
+        </div>
+      </div>
+
+      <div id="posts"></div>
+      <div class="hint">Note: Posts are stored encrypted locally in your browser. If you clear browser data they will be lost unless you export the encrypted data and salt.</div>
+    </div>
+
+    <footer>To publish a public site you can host this file in docs/ (GitHub Pages). This page does not expose plaintext passwords in the HTML.</footer>
+  </div>
+
+<script>
+(async function(){
+  // Helpers
+  const textEncoder = new TextEncoder();
+  const textDecoder = new TextDecoder();
+  const SALT_KEY = 'gossipgirl_salt_v1';
+  const DATA_KEY = 'gossipgirl_posts_enc_v1';
+
+  function toBase64(buf){ return btoa(String.fromCharCode(...new Uint8Array(buf))); }
+  function fromBase64(s){ const bin = atob(s); const arr = new Uint8Array(bin.length); for(let i=0;i<bin.length;i++) arr[i]=bin.charCodeAt(i); return arr.buffer; }
+
+  async function deriveKey(password, salt){
+    const passbuf = textEncoder.encode(password);
+    const keyMaterial = await crypto.subtle.importKey('raw', passbuf, 'PBKDF2', false, ['deriveKey']);
+    return crypto.subtle.deriveKey({name:'PBKDF2',salt:salt,iterations:150000,hash:'SHA-256'}, keyMaterial, {name:'AES-GCM',length:256}, false, ['encrypt','decrypt']);
+  }
+
+  async function encryptPosts(key, postsObj){
+    const iv = crypto.getRandomValues(new Uint8Array(12));
+    const data = textEncoder.encode(JSON.stringify(postsObj));
+    const ct = await crypto.subtle.encrypt({name:'AES-GCM',iv}, key, data);
+    // store iv + ciphertext
+    const stored = toBase64(iv) + ':' + toBase64(ct);
+    localStorage.setItem(DATA_KEY, stored);
+  }
+
+  async function decryptPosts(key){
+    const stored = localStorage.getItem(DATA_KEY);
+    if(!stored) return null;
+    const [ivB64,ctB64]=stored.split(':');
+    if(!ivB64||!ctB64) return null;
+    const iv = new Uint8Array(fromBase64(ivB64));
+    const ct = fromBase64(ctB64);
+    try{
+      const plain = await crypto.subtle.decrypt({name:'AES-GCM',iv}, key, ct);
+      return JSON.parse(textDecoder.decode(plain));
+    }catch(e){
+      throw new Error('Decryption failed');
+    }
+  }
+
+  // DOM
+  const passwordEl = document.getElementById('password');
+  const unlockBtn = document.getElementById('unlock');
+  const logoutBtn = document.getElementById('logout');
+  const loginMsg = document.getElementById('loginMsg');
+  const app = document.getElementById('app');
+  const postsEl = document.getElementById('posts');
+  const newpostEl = document.getElementById('newpost');
+  const postBtn = document.getElementById('post');
+  const exportBtn = document.getElementById('export');
+  const importBtn = document.getElementById('import');
+  const importFile = document.getElementById('importFile');
+
+  let cryptoKey = null;
+  let salt = null;
+  let posts = [];
+
+  function renderPosts(){
+    postsEl.innerHTML='';
+    if(posts.length===0) postsEl.innerHTML='<p class="small">No posts yet.</p>';
+    posts.slice().reverse().forEach(p=>{
+      const d = document.createElement('div'); d.className='post';
+      const t = document.createElement('div'); t.textContent = p.text; d.appendChild(t);
+      const m = document.createElement('div'); m.className='small muted'; m.textContent = new Date(p.ts).toLocaleString(); d.appendChild(m);
+      postsEl.appendChild(d);
+    });
+  }
+
+  function showLocked(msg){
+    app.style.display='none';
+    logoutBtn.style.display='none';
+    unlockBtn.style.display='inline-block';
+    loginMsg.textContent = msg||'Enter your password to unlock posts.';
+  }
+
+  function showUnlocked(){
+    app.style.display='block';
+    logoutBtn.style.display='inline-block';
+    unlockBtn.style.display='none';
+    loginMsg.textContent = '';
+  }
+
+  function getSalt(){
+    const s = localStorage.getItem(SALT_KEY);
+    if(s) return fromBase64(s);
+    const newSalt = crypto.getRandomValues(new Uint8Array(16));
+    localStorage.setItem(SALT_KEY, toBase64(newSalt));
+    return newSalt.buffer;
+  }
+
+  async function unlock(password){
+    try{
+      salt = getSalt();
+      cryptoKey = await deriveKey(password, salt);
+      const data = await decryptPosts(cryptoKey).catch(e=>{throw e});
+      if(!data){
+        // first time: create empty posts and save encrypted with this password
+        posts = [];
+        await encryptPosts(cryptoKey, posts);
+      }else{
+        posts = data;
+      }
+      renderPosts();
+      showUnlocked();
+    }catch(e){
+      cryptoKey = null; posts = [];
+      showLocked('Wrong password or corrupted data.');
+      console.error(e);
+    }
+  }
+
+  unlockBtn.addEventListener('click', ()=> unlock(passwordEl.value));
+  passwordEl.addEventListener('keydown',(e)=>{ if(e.key==='Enter') unlock(passwordEl.value); });
+
+  logoutBtn.addEventListener('click', ()=>{
+    cryptoKey = null; posts = []; showLocked('Locked.'); passwordEl.value='';
+  });
+
+  postBtn.addEventListener('click', async ()=>{
+    if(!cryptoKey) return alert('Unlock first');
+    const text = newpostEl.value.trim(); if(!text) return;
+    const p = {text,ts:Date.now()};
+    posts.push(p);
+    await encryptPosts(cryptoKey, posts);
+    newpostEl.value=''; renderPosts();
+  });
+
+  exportBtn.addEventListener('click', ()=>{
+    const obj = {salt: localStorage.getItem(SALT_KEY)||null, data: localStorage.getItem(DATA_KEY)||null};
+    const blob = new Blob([JSON.stringify(obj)],{type:'application/json'});
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a'); a.href=url; a.download='gossipgirl_encrypted_export.json'; a.click(); URL.revokeObjectURL(url);
+  });
+
+  importBtn.addEventListener('click', ()=> importFile.click());
+  importFile.addEventListener('change', async (ev)=>{
+    const f = ev.target.files[0]; if(!f) return;
+    try{
+      const txt = await f.text(); const obj = JSON.parse(txt);
+      if(obj.salt) localStorage.setItem(SALT_KEY, obj.salt);
+      if(obj.data) localStorage.setItem(DATA_KEY, obj.data);
+      alert('Imported. Please unlock with your password.');
+    }catch(e){ alert('Invalid file'); }
+  });
+
+  // initial UI
+  showLocked('Enter your password to unlock posts.');
+
+  // accessibility: focus password
+  passwordEl.focus();
+})();
+</script>
+</body>
+</html>
